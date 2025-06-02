@@ -1,0 +1,299 @@
+---
+apiVersion: v1
+data:
+  mariadb-password: your-pass
+kind: Secret
+metadata:
+  name: im-mariadb-im-livekit
+  labels:
+    db: im-livekit
+type: Opaque
+---
+apiVersion: v1
+data:
+  BUCKET_NAME: 'messenger-mariadb'
+  DB_HOST: 'mariadb.im-livekit.svc.cluster.local'
+  DB_NAME: 'im-livekit'
+  DB_PORT: '3306'
+  DB_USERNAME: 'root'
+  S3_ENDPOINT: 'http://192.168.112.52:8080'
+kind: ConfigMap
+metadata:
+  name: im-mariadb-im-livekit
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: im-livekit-schema
+spec:
+  schedule: "25 4 * * *"
+  concurrencyPolicy: Replace
+  successfulJobsHistoryLimit: 2
+  failedJobsHistoryLimit: 2
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          securityContext:
+            runAsUser: 0
+          tolerations:
+           - key: role
+             effect: NoSchedule
+             operator: Equal
+             value: infra
+          initContainers:
+          - name: db-backup
+            image: docker.io/bitnami/mariadb-galera:10.6.11-debian-11-r26
+            command:
+            - /bin/bash
+            - -c
+            - /opt/bitnami/mariadb/bin/mysqldump --no-data -h $(echo $DB_HOST) -P $(echo $DB_PORT) -u$(echo $DB_USERNAME) -p$(echo $DB_PASSWORD) $(echo $DB_NAME) > /backup/$(echo $DB_NAME)-$(date +%Y%m%d)-schema.sql
+            env:
+            - name: DB_HOST
+              valueFrom:
+                configMapKeyRef:
+                  name: im-mariadb-im-livekit
+                  key: DB_HOST
+            - name: DB_PORT
+              valueFrom:
+                configMapKeyRef:
+                  name: im-mariadb-im-livekit
+                  key: DB_PORT
+            - name: DB_NAME
+              valueFrom:
+                configMapKeyRef:
+                  name: im-mariadb-im-livekit
+                  key: DB_NAME
+            - name: DB_USERNAME
+              valueFrom:
+                configMapKeyRef:
+                  name: im-mariadb-im-livekit
+                  key: DB_USERNAME
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: im-mariadb-im-livekit
+                  key: mariadb-password
+            volumeMounts:
+            - name: backup
+              mountPath: /backup
+          - name: db-backup-delete
+            image: amazon/aws-cli:latest
+            env:
+            - name: S3_ENDPOINT
+              valueFrom:
+                configMapKeyRef:
+                  name: im-mariadb-im-livekit
+                  key: S3_ENDPOINT
+            - name: DB_NAME
+              valueFrom:
+                configMapKeyRef:
+                  name: im-mariadb-im-livekit
+                  key: DB_NAME
+            - name: BUCKET_NAME
+              valueFrom:
+                configMapKeyRef:
+                  name: im-mariadb-im-livekit
+                  key: BUCKET_NAME
+            command:
+            - /bin/bash
+            - -c
+            - rm -rf /backup/$(echo $DB_NAME)-$(date --date='7 day ago' +%Y%m%d)-schema.sql && aws s3 rm s3://$(echo $BUCKET_NAME)/$(echo $DB_NAME)/$(echo $DB_NAME)-$(date --date='7 day ago' +%Y%m%d)-schema.sql --endpoint-url $(echo $S3_ENDPOINT)
+            volumeMounts:
+            - name: backup
+              mountPath: /backup
+            - name: credentials
+              mountPath: /root/.aws/credentials
+              readOnly: true
+              subPath: credentials
+          containers:
+          - name: aws-cli
+            image: amazon/aws-cli:latest
+            imagePullPolicy: IfNotPresent
+            env:
+            - name: S3_ENDPOINT
+              valueFrom:
+                configMapKeyRef:
+                  name: im-mariadb-im-livekit
+                  key: S3_ENDPOINT
+            - name: DB_NAME
+              valueFrom:
+                configMapKeyRef:
+                  name: im-mariadb-im-livekit
+                  key: DB_NAME
+            - name: BUCKET_NAME
+              valueFrom:
+                configMapKeyRef:
+                  name: im-mariadb-im-livekit
+                  key: BUCKET_NAME
+            command:
+            - /bin/bash
+            - -c
+            - aws s3 cp /backup/$(echo $DB_NAME)-$(date +%Y%m%d)-schema.sql s3://$(echo $BUCKET_NAME)/$(echo $DB_NAME)/$(echo $DB_NAME)-$(date +%Y%m%d)-schema.sql --endpoint-url $(echo $S3_ENDPOINT)
+            volumeMounts:
+            - name: backup
+              mountPath: /backup
+            - name: credentials
+              mountPath: /root/.aws/credentials
+              readOnly: true
+              subPath: credentials
+          volumes:
+          - name: backup
+            persistentVolumeClaim:
+              claimName: backup
+              readOnly: false
+          - name: credentials
+            secret:
+              secretName: credentials
+          restartPolicy: OnFailure
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: im-livekit
+spec:
+  schedule: "30 4 * * *"
+  concurrencyPolicy: Replace
+  successfulJobsHistoryLimit: 2
+  failedJobsHistoryLimit: 2
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          securityContext:
+            runAsUser: 0
+          tolerations:
+           - key: role
+             effect: NoSchedule
+             operator: Equal
+             value: infra
+          initContainers:
+          - name: db-backup
+            image: docker.io/bitnami/mariadb-galera:10.6.11-debian-11-r26
+            command:
+            - /bin/bash
+            - -c
+            - /opt/bitnami/mariadb/bin/mysqldump -h $(echo $DB_HOST) -P $(echo $DB_PORT) -u$(echo $DB_USERNAME) -p$(echo $DB_PASSWORD) $(echo $DB_NAME) > /backup/$(echo $DB_NAME)-$(date +%Y%m%d).sql
+            env:
+            - name: DB_HOST
+              valueFrom:
+                configMapKeyRef:
+                  name: im-mariadb-im-livekit
+                  key: DB_HOST
+            - name: DB_PORT
+              valueFrom:
+                configMapKeyRef:
+                  name: im-mariadb-im-livekit
+                  key: DB_PORT
+            - name: DB_NAME
+              valueFrom:
+                configMapKeyRef:
+                  name: im-mariadb-im-livekit
+                  key: DB_NAME
+            - name: DB_USERNAME
+              valueFrom:
+                configMapKeyRef:
+                  name: im-mariadb-im-livekit
+                  key: DB_USERNAME
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: im-mariadb-im-livekit
+                  key: mariadb-password
+            volumeMounts:
+            - name: backup
+              mountPath: /backup
+          - name: db-backup-delete
+            image: amazon/aws-cli:latest
+            env:
+            - name: S3_ENDPOINT
+              valueFrom:
+                configMapKeyRef:
+                  name: im-mariadb-im-livekit
+                  key: S3_ENDPOINT
+            - name: DB_NAME
+              valueFrom:
+                configMapKeyRef:
+                  name: im-mariadb-im-livekit
+                  key: DB_NAME
+            - name: BUCKET_NAME
+              valueFrom:
+                configMapKeyRef:
+                  name: im-mariadb-im-livekit
+                  key: BUCKET_NAME
+            command:
+            - /bin/bash
+            - -c
+            - rm -rf /backup/$(echo $DB_NAME)-$(date --date='7 day ago' +%Y%m%d).sql && aws s3 rm s3://$(echo $BUCKET_NAME)/$(echo $DB_NAME)/$(echo $DB_NAME)-$(date --date='7 day ago' +%Y%m%d).sql --endpoint-url $(echo $S3_ENDPOINT)
+            volumeMounts:
+            - name: backup
+              mountPath: /backup
+            - name: credentials
+              mountPath: /root/.aws/credentials
+              readOnly: true
+              subPath: credentials
+          containers:
+          - name: aws-cli
+            image: amazon/aws-cli:latest
+            imagePullPolicy: IfNotPresent
+            env:
+            - name: S3_ENDPOINT
+              valueFrom:
+                configMapKeyRef:
+                  name: im-mariadb-im-livekit
+                  key: S3_ENDPOINT
+            - name: DB_NAME
+              valueFrom:
+                configMapKeyRef:
+                  name: im-mariadb-im-livekit
+                  key: DB_NAME
+            - name: BUCKET_NAME
+              valueFrom:
+                configMapKeyRef:
+                  name: im-mariadb-im-livekit
+                  key: BUCKET_NAME
+            volumeMounts:
+            - name: backup
+              mountPath: /backup
+            command:
+            - /bin/bash
+            - -c
+            - aws s3 cp /backup/$(echo $DB_NAME)-$(date +%Y%m%d).sql s3://$(echo $BUCKET_NAME)/$(echo $DB_NAME)/$(echo $DB_NAME)-$(date +%Y%m%d).sql --endpoint-url $(echo $S3_ENDPOINT)
+            volumeMounts:
+            - name: backup
+              mountPath: /backup
+            - name: credentials
+              mountPath: /root/.aws/credentials
+              readOnly: true
+              subPath: credentials
+          volumes:
+          - name: backup
+            persistentVolumeClaim:
+              claimName: backup
+              readOnly: false
+          - name: credentials
+            secret:
+              secretName: credentials
+          restartPolicy: OnFailure
+---
+apiVersion: v1
+data:
+  config: |
+    [default]
+    region = us-east-1
+    s3 =
+        multipart_threshold = 100MB
+        multipart_chunksize = 64MB
+kind: ConfigMap
+metadata:
+  name: aws-cli-config
+  namespace: backup-mariadb
+---
+apiVersion: v1
+data:
+  credentials: your-credential
+kind: Secret
+metadata:
+  name: credentials
+  namespace: backup-mariadb
+type: Opaque
