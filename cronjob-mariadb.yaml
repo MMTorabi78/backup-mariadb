@@ -297,3 +297,15 @@ metadata:
   name: credentials
   namespace: backup-mariadb
 type: Opaque
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: backup
+spec:
+  storageClassName: "cephfs-hdd-r3"
+  accessModes:
+    - ReadWriteMany
+  resources:
+    requests:
+      storage: 5Gi
