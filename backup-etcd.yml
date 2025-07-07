@@ -1,0 +1,139 @@
+---
+apiVersion: v1
+data:
+  BUCKET_NAME: 'messenger-etcd'
+  DB_HOST: 'https://127.0.0.1'
+  DB_PORT: '2379'
+  S3_ENDPOINT: 'http://192.168.112.52:8080'
+  DB_NAME: 'etcd'
+kind: ConfigMap
+metadata:
+  name: etcd
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: etcd
+spec:
+  schedule: "0 1 * * *"
+  concurrencyPolicy: Replace
+  successfulJobsHistoryLimit: 2
+  failedJobsHistoryLimit: 2
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          hostNetwork: true
+          securityContext:
+            runAsUser: 0
+          tolerations:
+           - key: node-role.kubernetes.io/control-plane
+             effect: NoSchedule
+             operator: Exists
+          initContainers:
+          - name: db-backup
+            image: anldisr/etcdctl
+            command:
+            - /bin/bash
+            - -c
+            - /usr/local/bin/etcdctl --endpoints $(echo $DB_HOST):$(echo $DB_PORT) --cacert=/etc/kubernetes/pki/etcd/ca.crt   --cert=/etc/kubernetes/pki/etcd/server.crt   --key=/etc/kubernetes/pki/etcd/server.key snapshot save /backup/$(echo $DB_NAME)-$(date +%Y%m%d)
+            env:
+            - name: ETCDCTL_API
+              value: "3"
+            - name: DB_HOST
+              valueFrom:
+                configMapKeyRef:
+                  name: etcd
+                  key: DB_HOST
+            - name: DB_PORT
+              valueFrom:
+                configMapKeyRef:
+                  name: etcd
+                  key: DB_PORT
+            - name: DB_NAME
+              valueFrom:
+                configMapKeyRef:
+                  name: etcd
+                  key: DB_NAME
+            volumeMounts:
+            - name: backup
+              mountPath: /backup
+            - mountPath: /etc/kubernetes/pki/etcd
+              name: etcd-certs
+              readOnly: true
+          - name: db-backup-delete
+            image: amazon/aws-cli:latest
+            env:
+            - name: S3_ENDPOINT
+              valueFrom:
+                configMapKeyRef:
+                  name: etcd
+                  key: S3_ENDPOINT
+            - name: DB_NAME
+              valueFrom:
+                configMapKeyRef:
+                  name: etcd
+                  key: DB_NAME
+            - name: BUCKET_NAME
+              valueFrom:
+                configMapKeyRef:
+                  name: etcd
+                  key: BUCKET_NAME
+            command:
+            - /bin/bash
+            - -c
+            - rm -rf /backup/$(echo $DB_NAME)-$(date --date='7 day ago' +%Y%m%d) && aws s3 rm s3://$(echo $BUCKET_NAME)/$(echo $DB_NAME)/$(echo $DB_NAME)-$(date --date='7 day ago' +%Y%m%d) --endpoint-url $(echo $S3_ENDPOINT)
+            volumeMounts:
+            - name: backup
+              mountPath: /backup
+            - name: credentials
+              mountPath: /root/.aws/credentials
+              readOnly: true
+              subPath: credentials
+          containers:
+          - name: aws-cli
+            image: amazon/aws-cli:latest
+            imagePullPolicy: IfNotPresent
+            env:
+            - name: S3_ENDPOINT
+              valueFrom:
+                configMapKeyRef:
+                  name: etcd
+                  key: S3_ENDPOINT
+            - name: DB_NAME
+              valueFrom:
+                configMapKeyRef:
+                  name: etcd
+                  key: DB_NAME
+            - name: BUCKET_NAME
+              valueFrom:
+                configMapKeyRef:
+                  name: etcd
+                  key: BUCKET_NAME
+            volumeMounts:
+            - name: backup
+              mountPath: /backup
+            command:
+            - /bin/bash
+            - -c
+            - aws s3 cp /backup/$(echo $DB_NAME)-$(date +%Y%m%d) s3://$(echo $BUCKET_NAME)/$(echo $DB_NAME)/$(echo $DB_NAME)-$(date +%Y%m%d) --endpoint-url $(echo $S3_ENDPOINT)
+            volumeMounts:
+            - name: backup
+              mountPath: /backup
+            - name: credentials
+              mountPath: /root/.aws/credentials
+              readOnly: true
+              subPath: credentials
+          volumes:
+          - name: backup
+            persistentVolumeClaim:
+              claimName: backup
+              readOnly: false
+          - name: credentials
+            secret:
+              secretName: credentials
+          - hostPath:
+              path: /etc/kubernetes/pki/etcd
+              type: Directory
+            name: etcd-certs
+          restartPolicy: OnFailure
