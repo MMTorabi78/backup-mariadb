@@ -1,0 +1,151 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: etcd-backup
+spec:
+  schedule: "0 1 * * *"
+  jobTemplate:
+    spec:
+      template:
+        spec:
+          hostNetwork: true
+          securityContext:
+            runAsUser: 0
+          restartPolicy: OnFailure
+          tolerations:
+           - key: node-role.kubernetes.io/control-plane
+             effect: NoSchedule
+             operator: Exists
+          initContainers:
+          - name: etcd-backup
+            image: anldisr/etcdctl
+            command:
+            - /bin/bash
+            - -c
+            - |
+              BACKUP_FILE="/tmp/${DB_NAME}-$(date +%Y%m%d).db"
+              etcdctl --endpoints=${DB_HOST}:${DB_PORT} \
+                --cacert=/etc/kubernetes/pki/etcd/ca.crt \
+                --cert=/etc/kubernetes/pki/etcd/server.crt \
+                --key=/etc/kubernetes/pki/etcd/server.key \
+                snapshot save $BACKUP_FILE
+            env:
+            - name: ETCDCTL_API
+              value: "3"
+            - name: DB_HOST
+              valueFrom:
+                configMapKeyRef:
+                  name: etcd
+                  key: DB_HOST
+            - name: DB_PORT
+              valueFrom:
+                configMapKeyRef:
+                  name: etcd
+                  key: DB_PORT
+            - name: DB_NAME
+              valueFrom:
+                configMapKeyRef:
+                  name: etcd
+                  key: DB_NAME
+            volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            - mountPath: /etc/kubernetes/pki/etcd
+              name: etcd-certs
+              readOnly: true
+
+          - name: delete-old-s3
+            image: amazon/aws-cli:latest
+            command:
+            - /bin/bash
+            - -c
+            - |
+              OLD_FILE="${DB_NAME}-$(date --date='7 days ago' +%Y%m%d).db"
+              aws s3 rm s3://${BUCKET_NAME}/${DB_NAME}/$OLD_FILE --endpoint-url ${S3_ENDPOINT} || true
+            env:
+            - name: DB_NAME
+              valueFrom:
+                configMapKeyRef:
+                  name: etcd
+                  key: DB_NAME
+            - name: BUCKET_NAME
+              valueFrom:
+                configMapKeyRef:
+                  name: etcd
+                  key: BUCKET_NAME
+            - name: S3_ENDPOINT
+              valueFrom:
+                configMapKeyRef:
+                  name: etcd
+                  key: S3_ENDPOINT
+            volumeMounts:
+            - name: credentials
+              mountPath: /root/.aws/credentials
+              readOnly: true
+              subPath: credentials
+
+          containers:
+          - name: upload-to-s3
+            image: amazon/aws-cli:latest
+            command:
+            - /bin/bash
+            - -c
+            - |
+              FILE="/tmp/${DB_NAME}-$(date +%Y%m%d).db"
+              aws s3 cp $FILE s3://${BUCKET_NAME}/${DB_NAME}/ --endpoint-url ${S3_ENDPOINT}
+            env:
+            - name: DB_NAME
+              valueFrom:
+                configMapKeyRef:
+                  name: etcd
+                  key: DB_NAME
+            - name: BUCKET_NAME
+              valueFrom:
+                configMapKeyRef:
+                  name: etcd
+                  key: BUCKET_NAME
+            - name: S3_ENDPOINT
+              valueFrom:
+                configMapKeyRef:
+                  name: etcd
+                  key: S3_ENDPOINT
+            volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            - name: credentials
+              mountPath: /root/.aws/credentials
+              readOnly: true
+              subPath: credentials
+
+          volumes:
+          - name: tmp
+            emptyDir: {}
+          - name: etcd-certs
+            hostPath:
+              path: /etc/kubernetes/pki/etcd
+              type: Directory
+          - name: credentials
+            secret:
+              secretName: credentials
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: etcd
+data:
+  DB_HOST: "https://127.0.0.1"
+  DB_PORT: "2379"
+  DB_NAME: "etcd"
+  BUCKET_NAME: "stage-etcd"
+  S3_ENDPOINT: "http://192.168.112.52:8080"
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: credentials
+type: Opaque
+stringData:
+  credentials: |
+    [default]
+    aws_access_key_id = YOUR_ACCESS_KEY
+    aws_secret_access_key = YOUR_SECRET_KEY
